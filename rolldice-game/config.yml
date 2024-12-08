@@ -1,0 +1,146 @@
+receivers:
+  otlp:
+    protocols:
+      # https://github.com/open-telemetry/opentelemetry-collector/blob/main/docs/security-best-practices.md#safeguards-against-denial-of-service-attacks
+      grpc:
+        endpoint: otelcol:4317
+      http:
+        endpoint: otelcol:4318
+  filelog:
+    include: [/rolling/*.log]
+    start_at: end
+    operators:
+      - id: parse_log
+        type: json_parser # https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/pkg/stanza/docs/operators/json_parser.md
+        timestamp:
+          parse_from: attributes.asctime
+          layout: "%Y-%m-%dT%H:%M:%S"
+        severity:
+          parse_from: attributes.levelname
+      - id: trace
+        type: trace_parser # https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/pkg/stanza/docs/operators/trace_parser.md
+        trace_id:
+          parse_from: attributes.trace_id
+        span_id:
+          parse_from: attributes.span_id
+    attributes:
+      ddtags: env:staging,host:my-mac
+
+  # The hostmetrics receiver is required to get correct infrastructure metrics in Datadog.
+  hostmetrics:
+    # collect metrics every 10 seconds.
+    collection_interval: 10s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.utilization:
+            enabled: true
+      disk:
+      filesystem:
+      memory:
+      network:
+      load:
+      paging:
+      processes:
+
+processors:
+  # The batch processor batches telemetry data into larger payloads.
+  # It is necessary for the Datadog traces exporter to work optimally,
+  # and is recommended for any production pipeline.
+
+  # probabilistic_sampler:
+  #   sampling_percentage: 20
+
+  # Datadog APM Intake limit is 3.2MB. Let's make sure the batches do not go over that.
+  batch:
+    send_batch_max_size: 1000
+    send_batch_size: 100
+    timeout: 10s
+
+connectors:
+  # The Datadog Connector is a connector component that derives APM statistics, in the form of metrics, from service traces,
+  # for display in the Datadog APM product. This component is required for trace-emitting services and their statistics to appear in Datadog APM.
+  datadog/connector:
+    # https://docs.datadoghq.com/tracing/services/inferred_services/?site=us3&tab=opentelemetrycollector#set-up-inferred-services
+    traces:
+      compute_stats_by_span_kind: true
+      peer_tags_aggregation: true
+      peer_tags:
+        [
+          "_dd.base_service",
+          "amqp.destination",
+          "amqp.exchange",
+          "amqp.queue",
+          "aws.queue.name",
+          "aws.s3.bucket",
+          "bucketname",
+          "db.cassandra.contact.points",
+          "db.couchbase.seed.nodes",
+          "db.hostname",
+          "db.instance",
+          "db.name",
+          "db.namespace",
+          "db.system",
+          "grpc.host",
+          "hostname",
+          "http.host",
+          "http.server_name",
+          "messaging.destination",
+          "messaging.destination.name",
+          "messaging.kafka.bootstrap.servers",
+          "messaging.rabbitmq.exchange",
+          "messaging.system",
+          "mongodb.db",
+          "msmq.queue.path",
+          "net.peer.name",
+          "network.destination.name",
+          "peer.hostname",
+          "peer.service",
+          "queuename",
+          "rpc.service",
+          "rpc.system",
+          "server.address",
+          "streamname",
+          "tablename",
+          "topicname",
+        ]
+
+exporters:
+  # NOTE: Prior to v0.86.0 use `logging` instead of `debug`.
+  debug:
+    verbosity: detailed
+  # The Datadog exporter is necessary for exporting telemetry signals to Datadog.
+  datadog:
+    api:
+      site: ${DD_SITE}
+      key: ${DD_API_KEY}
+
+# `service` defines the Collector pipelines, observability settings and extensions.
+service:
+  # `pipelines` defines the data pipelines. Multiple data pipelines for a type may be defined.
+  pipelines:
+    # Pipelines starting with `traces` or `traces/` define a traces pipeline.
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [datadog/connector]
+
+    traces/sampling:
+      # This pipeline has a Datadog connector, a batch processor and a Datadog exporter.
+      # It receivers all traces from the Datadog connector and sends them to Datadog.
+      # Add any sampling here, so that the generated trace metrics account for all traces.
+      receivers: [datadog/connector]
+      # processors: [batch, probabilistic_sampler]
+      processors: [batch]
+      exporters: [datadog]
+
+    # Pipelines starting with `metrics` or `metrics/` define a metrics pipeline.
+    metrics:
+      receivers: [hostmetrics, datadog/connector, otlp]
+      processors: [batch]
+      exporters: [datadog]
+
+    logs:
+      receivers: [filelog]
+      processors: [batch]
+      exporters: [debug, datadog]
